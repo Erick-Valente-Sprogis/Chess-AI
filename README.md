@@ -54,7 +54,7 @@ pip install pygame python-chess
 **3. Baixe a Fonte (Essencial)**
 As peças do xadrez são renderizadas usando caracteres Unicode, que não estão presentes em todas as fontes padrão. Nós utilizamos a fonte **DejaVu Sans**, que tem excelente suporte a esses símbolos.
 
-- **Baixe a fonte aqui:** [Google Fonts - DejaVu Sans](https://fonts.google.com/specimen/DejaVu+Sans)
+- **Baixe a fonte aqui:** [DejaVu Sans Font Family](https://www.1001fonts.com/dejavu-sans-font.html)
 - Após baixar e extrair o arquivo `.zip`, encontre o arquivo **`DejaVuSans.ttf`** e coloque-o **na mesma pasta** onde está o seu arquivo `main.py`.
 
 **4. Execute o Jogo**
