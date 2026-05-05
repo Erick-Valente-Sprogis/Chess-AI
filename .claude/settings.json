@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ ! -f /tmp/claude_session_start.txt ] || [ $(( $(date +%s) - $(stat -c %Y /tmp/claude_session_start.txt) )) -gt 1800 ]; then echo \"$(date '+%d/%m/%Y às %H:%M')\" > /tmp/claude_session_start.txt; fi",
+            "statusMessage": "Registrando início de sessão..."
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -3,16 +3,17 @@ import chess
 import sys
 import math
 import random
+import threading
 
 # --- Configurações e Constantes ---
-PADDING = 40
-BOARD_SIZE = 640
-INFO_HEIGHT = 60
-HISTORY_WIDTH = 240
+PADDING = 70
+BOARD_SIZE = 720
+INFO_HEIGHT = 70
+HISTORY_WIDTH = 300
 SEARCH_DEPTH = 3
 
 # Dimensões de tela separadas para Menu e Jogo
-MENU_WIDTH, MENU_HEIGHT = 600, 600
+MENU_WIDTH, MENU_HEIGHT = 700, 700
 GAME_WIDTH = BOARD_SIZE + HISTORY_WIDTH + PADDING
 GAME_HEIGHT = BOARD_SIZE + INFO_HEIGHT + PADDING
 
@@ -29,9 +30,11 @@ PIECE_SYMBOLS = {'P':'♙','R':'♖','N':'♘','B':'♗','Q':'♕','K':'♔','p'
 
 # Áreas da Tela (calculadas dinamicamente quando necessário)
 BOARD_RECT = pygame.Rect(PADDING, INFO_HEIGHT, BOARD_SIZE, BOARD_SIZE)
-ACTION_PANEL_HEIGHT = 120
+ACTION_PANEL_HEIGHT = 140
 HISTORY_RECT = pygame.Rect(BOARD_RECT.right, INFO_HEIGHT, HISTORY_WIDTH, GAME_HEIGHT - INFO_HEIGHT - ACTION_PANEL_HEIGHT)
 ACTION_PANEL_RECT = pygame.Rect(BOARD_RECT.right, HISTORY_RECT.bottom, HISTORY_WIDTH, ACTION_PANEL_HEIGHT)
+_PAUSE_BTN_SIZE = 48
+PAUSE_BTN = pygame.Rect(BOARD_RECT.centerx - _PAUSE_BTN_SIZE // 2, (INFO_HEIGHT - _PAUSE_BTN_SIZE) // 2, _PAUSE_BTN_SIZE, _PAUSE_BTN_SIZE)
 
 # --- Lógica da IA ---
 piece_values = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 0}
@@ -45,20 +48,80 @@ piece_square_table = {
 }
 def evaluate_board(board):
     if board.is_checkmate(): return math.inf if board.turn == chess.BLACK else -math.inf
-    if board.is_stalemate() or board.is_insufficient_material() or board.is_repetition(2): return 0
+    if board.is_stalemate() or board.is_insufficient_material() or board.is_repetition(3): return 0
+    if board.is_repetition(2): return 0.3 if board.turn == chess.WHITE else -0.3
     total_value = 0
     for sq in chess.SQUARES:
         p = board.piece_at(sq)
         if p:
             val = piece_values[p.piece_type] + (piece_square_table[p.piece_type][sq if p.color else chess.square_mirror(sq)]/100.0)
             total_value += val if p.color == chess.WHITE else -val
+    if board.turn == chess.WHITE:
+        white_moves = board.legal_moves.count()
+        board.push(chess.Move.null())
+        black_moves = board.legal_moves.count()
+        board.pop()
+    else:
+        black_moves = board.legal_moves.count()
+        board.push(chess.Move.null())
+        white_moves = board.legal_moves.count()
+        board.pop()
+    total_value += (white_moves - black_moves) * 0.05
     return total_value
+
+def order_moves(board, moves):
+    def score(move):
+        s = 0
+        if board.is_capture(move):
+            victim = board.piece_at(move.to_square)
+            attacker = board.piece_at(move.from_square)
+            if victim and attacker:
+                s += piece_values[victim.piece_type] * 10 - piece_values[attacker.piece_type]
+        if move.promotion:
+            s += piece_values[move.promotion] * 10
+        return s
+    return sorted(moves, key=score, reverse=True)
+
+def quiescence(board, alpha, beta, is_maximizing_player):
+    stand_pat = evaluate_board(board)
+    if is_maximizing_player:
+        if stand_pat >= beta:
+            return beta
+        alpha = max(alpha, stand_pat)
+        for move in order_moves(board, list(board.legal_moves)):
+            if not board.is_capture(move) and not move.promotion:
+                continue
+            board.push(move)
+            score = quiescence(board, alpha, beta, False)
+            board.pop()
+            if score >= beta:
+                return beta
+            alpha = max(alpha, score)
+        return alpha
+    else:
+        if stand_pat <= alpha:
+            return alpha
+        beta = min(beta, stand_pat)
+        for move in order_moves(board, list(board.legal_moves)):
+            if not board.is_capture(move) and not move.promotion:
+                continue
+            board.push(move)
+            score = quiescence(board, alpha, beta, True)
+            board.pop()
+            if score <= alpha:
+                return alpha
+            beta = min(beta, score)
+        return beta
+
 def minimax(board, depth, alpha, beta, is_maximizing_player):
-    if depth == 0 or board.is_game_over():
+    if board.is_game_over():
         return evaluate_board(board)
+    if depth == 0:
+        return quiescence(board, alpha, beta, is_maximizing_player)
+    moves = order_moves(board, list(board.legal_moves))
     if is_maximizing_player:
         max_eval = -math.inf
-        for move in board.legal_moves:
+        for move in moves:
             board.push(move)
             eval = minimax(board, depth - 1, alpha, beta, False)
             board.pop()
@@ -69,7 +132,7 @@ def minimax(board, depth, alpha, beta, is_maximizing_player):
         return max_eval
     else:
         min_eval = math.inf
-        for move in board.legal_moves:
+        for move in moves:
             board.push(move)
             eval = minimax(board, depth - 1, alpha, beta, True)
             board.pop()
@@ -81,7 +144,7 @@ def minimax(board, depth, alpha, beta, is_maximizing_player):
 def find_best_ai_move(board):
     best_moves = []
     best_value = -math.inf if board.turn == chess.WHITE else math.inf
-    for move in board.legal_moves:
+    for move in order_moves(board, list(board.legal_moves)):
         board.push(move)
         board_value = minimax(board, SEARCH_DEPTH - 1, -math.inf, math.inf, not board.turn)
         board.pop()
@@ -163,35 +226,48 @@ def get_square_from_mouse(pos, perspective):
     col = (pos[0] - BOARD_RECT.left) // SQUARE_SIZE
     if perspective == chess.BLACK: row, col = 7 - row, 7 - col
     return (7 - row) * 8 + col
-def draw_info_panel(screen, font, board):
+def draw_info_panel(screen, font, board, ai_thinking=False):
     info_rect = pygame.Rect(0, 0, BOARD_RECT.right, INFO_HEIGHT)
     pygame.draw.rect(screen, COLOR_MENU_BG, info_rect)
     move_text = f"Movimento: {board.fullmove_number}"
     move_r = pygame.Rect(PADDING, 0, 200, INFO_HEIGHT)
     draw_text(screen, move_text, font, COLOR_MENU_TEXT, move_r, "left")
-    turn_text = "Vez das Brancas" if board.turn == chess.WHITE else "Vez das Pretas"
+    if ai_thinking:
+        turn_text = "IA pensando..."
+    else:
+        turn_text = "Vez das Brancas" if board.turn == chess.WHITE else "Vez das Pretas"
     turn_r = pygame.Rect(BOARD_RECT.right - 200, 0, 200, INFO_HEIGHT)
     draw_text(screen, turn_text, font, COLOR_MENU_TEXT, turn_r, "right")
+    pygame.draw.rect(screen, COLOR_DARK, PAUSE_BTN, border_radius=6)
+    bar_w, bar_h = 7, 24
+    bar_y = PAUSE_BTN.centery - bar_h // 2
+    pygame.draw.rect(screen, COLOR_MENU_TEXT, (PAUSE_BTN.centerx - 11, bar_y, bar_w, bar_h))
+    pygame.draw.rect(screen, COLOR_MENU_TEXT, (PAUSE_BTN.centerx + 4,  bar_y, bar_w, bar_h))
 def draw_history_panel(screen, font, history_san, scroll_offset):
     pygame.draw.rect(screen, COLOR_MENU_BG, HISTORY_RECT)
     title_rect = pygame.Rect(HISTORY_RECT.left, 0, HISTORY_RECT.width, INFO_HEIGHT)
     draw_text(screen, "Histórico", font, COLOR_MENU_TEXT, title_rect, "center")
     header_y = INFO_HEIGHT
-    white_header_rect = pygame.Rect(HISTORY_RECT.left + 35, header_y, 70, 30)
-    black_header_rect = pygame.Rect(HISTORY_RECT.left + 125, header_y, 70, 30)
+    num_x = HISTORY_RECT.left + 5
+    num_w = 38
+    move_col_w = (HISTORY_RECT.width - num_w - 20) // 2
+    white_x = num_x + num_w + 5
+    black_x = white_x + move_col_w + 5
+    white_header_rect = pygame.Rect(white_x, header_y, move_col_w, 32)
+    black_header_rect = pygame.Rect(black_x, header_y, move_col_w, 32)
     draw_text(screen, "Brancas", font, COLOR_MENU_TEXT, white_header_rect, "left")
     draw_text(screen, "Pretas", font, COLOR_MENU_TEXT, black_header_rect, "left")
-    y_offset = header_y + 30
-    line_height, max_visible_lines = 25, (HISTORY_RECT.height - (y_offset - HISTORY_RECT.top)) // 25
+    y_offset = header_y + 32
+    line_height = 28
     start_index = scroll_offset * 2
     move_number = (start_index // 2) + 1
     for i in range(start_index, len(history_san), 2):
         if y_offset + line_height > HISTORY_RECT.bottom: break
         white_move = history_san[i]; black_move = ""
         if i + 1 < len(history_san): black_move = history_san[i+1]
-        num_r = pygame.Rect(HISTORY_RECT.left+5, y_offset, 30, line_height)
-        white_r = pygame.Rect(HISTORY_RECT.left+35, y_offset, 70, line_height)
-        black_r = pygame.Rect(HISTORY_RECT.left+125, y_offset, 70, line_height)
+        num_r   = pygame.Rect(num_x,   y_offset, num_w,      line_height)
+        white_r = pygame.Rect(white_x, y_offset, move_col_w, line_height)
+        black_r = pygame.Rect(black_x, y_offset, move_col_w, line_height)
         draw_text(screen, f"{move_number}.", font, COLOR_MENU_TEXT, num_r, "left")
         draw_text(screen, white_move, font, COLOR_MENU_TEXT, white_r, "left")
         draw_text(screen, black_move, font, COLOR_MENU_TEXT, black_r, "left")
@@ -205,6 +281,33 @@ def draw_game_over_popup(screen, font_main, font_sub, message, btn_see, btn_agai
     sub_r = pygame.Rect(pop_r.x, pop_r.y + 45, pop_r.width, pop_r.height * 0.4); draw_text(screen, sub_msg, font_sub, COLOR_COORD, sub_r, "center")
     pygame.draw.rect(screen, COLOR_DARK, btn_see); draw_text(screen, "Ver Tabuleiro", font_sub, COLOR_MENU_TEXT, btn_see, "center")
     pygame.draw.rect(screen, COLOR_DARK, btn_again); draw_text(screen, "Ir para o Menu", font_sub, COLOR_MENU_TEXT, btn_again, "center")
+def draw_pause_menu(screen, font_title, font_btn):
+    overlay = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
+    overlay.fill((0, 0, 0, 180))
+    screen.blit(overlay, (0, 0))
+    pop_w, pop_h = 480, 380
+    pop_r = pygame.Rect((screen.get_width()-pop_w)//2, (screen.get_height()-pop_h)//2, pop_w, pop_h)
+    pygame.draw.rect(screen, COLOR_MENU_BG, pop_r)
+    pygame.draw.rect(screen, COLOR_MENU_TEXT, pop_r, 2)
+    title_r = pygame.Rect(pop_r.x, pop_r.y + 10, pop_r.width, 50)
+    draw_text(screen, "Pausa", font_title, COLOR_MENU_TEXT, title_r, "center")
+    btn_w, btn_h, btn_gap = 400, 50, 12
+    btn_x = pop_r.x + (pop_w - btn_w) // 2
+    btn_y0 = pop_r.y + 80
+    entries = [
+        ("Retornar à Partida",           COLOR_DARK,    COLOR_MENU_TEXT),
+        ("Reiniciar Partida",             COLOR_DARK,    COLOR_MENU_TEXT),
+        ("Mudar Dificuldade  (Em breve)", (65, 65, 65),  (120, 120, 120)),
+        ("Voltar ao Menu Principal",      COLOR_DARK,    COLOR_MENU_TEXT),
+    ]
+    btns = []
+    for i, (label, bg, fg) in enumerate(entries):
+        btn = pygame.Rect(btn_x, btn_y0 + i*(btn_h+btn_gap), btn_w, btn_h)
+        btns.append(btn)
+        pygame.draw.rect(screen, bg, btn)
+        draw_text(screen, label, font_btn, fg, btn, "center")
+    return btns
+
 def draw_action_panel(screen, font):
     pygame.draw.rect(screen, COLOR_MENU_BG, ACTION_PANEL_RECT)
     action_btn_w, action_btn_h = ACTION_PANEL_RECT.width-20, 45; action_btn_x = ACTION_PANEL_RECT.left+10
@@ -218,18 +321,30 @@ def main():
     pygame.init(); pygame.font.init()
     screen = pygame.display.set_mode((MENU_WIDTH, MENU_HEIGHT))
     pygame.display.set_caption("Xadrez em Python")
-    try:
-        font_pieces = pygame.font.Font("dejavusans.ttf", int(SQUARE_SIZE*0.75)); font_ui = pygame.font.Font("dejavusans.ttf", 20)
-        font_coords = pygame.font.Font("dejavusans.ttf", 16); font_popup = pygame.font.Font("dejavusans.ttf", 36)
-        font_popup_sub = pygame.font.Font("dejavusans.ttf", 22)
-    except FileNotFoundError:
-        font_pieces=pygame.font.Font(None,int(SQUARE_SIZE*0.9)); font_ui=pygame.font.Font(None,24); font_coords=pygame.font.Font(None,18)
-        font_popup=pygame.font.Font(None,40); font_popup_sub=pygame.font.Font(None,26)
+    _font_path = (pygame.font.match_font('dejavusans') or
+                  pygame.font.match_font('notosanssymbols2') or
+                  pygame.font.match_font('notosanssymbols'))
+    def load_font(size):
+        if _font_path:
+            return pygame.font.Font(_font_path, size)
+        return pygame.font.Font(None, size)
+    font_pieces = load_font(int(SQUARE_SIZE*0.75))
+    font_ui = load_font(20)
+    font_coords = load_font(16)
+    font_popup = load_font(36)
+    font_popup_sub = load_font(22)
     
+    ai_move_to_make = None
+    ai_thread = None
+    ai_result = [None]
+
     state_vars = {}
     def reset_game():
-        nonlocal screen
+        nonlocal screen, ai_move_to_make, ai_thread, ai_result
         screen = pygame.display.set_mode((MENU_WIDTH, MENU_HEIGHT))
+        ai_move_to_make = None
+        ai_thread = None
+        ai_result = [None]
         state_vars.update({'board':chess.Board(), 'game_state':"MENU", 'game_mode':None, 'player_color':None, 'perspective':chess.WHITE, 'selected_square':None, 'possible_moves':[], 'game_over_message':"", 'move_history_san':[], 'history_scroll_offset': 0})
     reset_game()
 
@@ -237,15 +352,24 @@ def main():
         screen.fill(COLOR_MENU_BG); draw_board(screen); draw_coordinates(screen,font_coords,state_vars['perspective'])
         draw_visual_aids(screen,state_vars['board'],state_vars['perspective'],state_vars['selected_square'],state_vars['possible_moves'])
         draw_pieces(screen,state_vars['board'],font_pieces,state_vars['perspective'])
-        draw_info_panel(screen,font_ui,state_vars['board']); draw_history_panel(screen,font_ui,state_vars['move_history_san'],state_vars['history_scroll_offset'])
+        thinking = ai_thread is not None and ai_thread.is_alive()
+        draw_info_panel(screen,font_ui,state_vars['board'],thinking); draw_history_panel(screen,font_ui,state_vars['move_history_san'],state_vars['history_scroll_offset'])
         return draw_action_panel(screen, font_ui)
 
-    ai_move_to_make = None
     running = True
     while running:
         current_state = state_vars['game_state']
         for e in pygame.event.get():
             if e.type == pygame.QUIT: running = False
+            if e.type == pygame.KEYDOWN:
+                if e.key == pygame.K_F5:
+                    screen = pygame.display.set_mode((GAME_WIDTH, GAME_HEIGHT))
+                    state_vars['game_state'] = "REVISAO"
+                elif e.key == pygame.K_ESCAPE:
+                    if current_state == "JOGANDO":
+                        state_vars['game_state'] = "PAUSE"
+                    elif current_state == "PAUSE":
+                        state_vars['game_state'] = "JOGANDO"
             if e.type == pygame.MOUSEWHEEL and current_state in ["JOGANDO", "REVISAO"]:
                 if HISTORY_RECT.collidepoint(pygame.mouse.get_pos()):
                     state_vars['history_scroll_offset'] -= e.y
@@ -261,6 +385,9 @@ def main():
                         elif black_btn.collidepoint(e.pos): state_vars.update(game_mode="IA",player_color=chess.BLACK,perspective=chess.BLACK,game_state="JOGANDO")
                         elif pvp_btn.collidepoint(e.pos): state_vars.update(game_mode="PvP",perspective=chess.WHITE,game_state="JOGANDO")
                 elif current_state == "JOGANDO":
+                    if PAUSE_BTN.collidepoint(e.pos):
+                        state_vars['game_state'] = "PAUSE"
+                        continue
                     is_human_turn=(state_vars['game_mode']=="PvP")or(state_vars['game_mode']=="IA" and state_vars['board'].turn==state_vars['player_color'])
                     if is_human_turn:
                         undo_button, reset_button = draw_action_panel(screen, font_ui)
@@ -287,13 +414,31 @@ def main():
                     if see_board_btn.collidepoint(e.pos): state_vars['game_state']="REVISAO"
                     elif again_popup_btn.collidepoint(e.pos): reset_game()
                 elif current_state == "REVISAO":
-                    btn_w,btn_h=400,50; again_review_btn=pygame.Rect((BOARD_RECT.width-btn_w)//2+BOARD_RECT.left,BOARD_RECT.bottom+5,btn_w,btn_h)
+                    btn_w,btn_h=400,40; _below=GAME_HEIGHT-BOARD_RECT.bottom; again_review_btn=pygame.Rect((BOARD_RECT.width-btn_w)//2+BOARD_RECT.left,BOARD_RECT.bottom+(_below-btn_h)//2,btn_w,btn_h)
                     if again_review_btn.collidepoint(e.pos): reset_game()
+                elif current_state == "PAUSE":
+                    resume_btn, restart_btn, _, menu_btn = draw_pause_menu(screen, font_popup, font_ui)
+                    if resume_btn.collidepoint(e.pos):
+                        state_vars['game_state'] = "JOGANDO"
+                    elif restart_btn.collidepoint(e.pos):
+                        _mode = state_vars['game_mode']; _color = state_vars['player_color']; _persp = state_vars['perspective']
+                        reset_game()
+                        screen = pygame.display.set_mode((GAME_WIDTH, GAME_HEIGHT))
+                        state_vars.update(game_mode=_mode, player_color=_color, perspective=_persp, game_state="JOGANDO")
+                    elif menu_btn.collidepoint(e.pos):
+                        reset_game()
 
         if current_state == "JOGANDO":
             is_human_turn=(state_vars['game_mode']=="PvP") or (state_vars['game_mode']=="IA" and state_vars['board'].turn==state_vars['player_color'])
-            if not is_human_turn and state_vars['game_mode']=="IA" and ai_move_to_make is None:
-                ai_move_to_make = find_best_ai_move(state_vars['board'])
+            if not is_human_turn and state_vars['game_mode']=="IA" and ai_move_to_make is None and ai_thread is None:
+                board_copy = state_vars['board'].copy()
+                ai_result[0] = None
+                ai_thread = threading.Thread(target=lambda: ai_result.__setitem__(0, find_best_ai_move(board_copy)), daemon=True)
+                ai_thread.start()
+            if ai_thread is not None and not ai_thread.is_alive():
+                ai_move_to_make = ai_result[0]
+                ai_result[0] = None
+                ai_thread = None
 
         screen.fill(COLOR_MENU_BG)
         if current_state == "MENU":
@@ -306,18 +451,20 @@ def main():
         elif current_state in ["JOGANDO", "REVISAO"]:
             draw_game_screen()
             if current_state == "REVISAO":
-                btn_w,btn_h=400,50; again_review_btn=pygame.Rect((BOARD_RECT.width-btn_w)//2+BOARD_RECT.left,BOARD_RECT.bottom+5,btn_w,btn_h)
+                btn_w,btn_h=400,40; _below=GAME_HEIGHT-BOARD_RECT.bottom; again_review_btn=pygame.Rect((BOARD_RECT.width-btn_w)//2+BOARD_RECT.left,BOARD_RECT.bottom+(_below-btn_h)//2,btn_w,btn_h)
                 pygame.draw.rect(screen, COLOR_DARK, again_review_btn); draw_text(screen, "Ir para o Menu", font_ui, COLOR_MENU_TEXT, again_review_btn, "center")
+        elif current_state == "PAUSE":
+            draw_game_screen()
+            draw_pause_menu(screen, font_popup, font_ui)
         elif current_state == "FIM_DE_JOGO":
             draw_game_screen()
             pop_btn_w,pop_btn_h=200,50; pop_btn_y=(GAME_HEIGHT-pop_btn_h)//2+60
             see_board_btn=pygame.Rect((GAME_WIDTH-pop_btn_w*2-20)//2,pop_btn_y,pop_btn_w,pop_btn_h); again_popup_btn=pygame.Rect(see_board_btn.right+20,pop_btn_y,pop_btn_w,pop_btn_h)
             draw_game_over_popup(screen,font_popup,font_popup_sub,state_vars['game_over_message'],see_board_btn,again_popup_btn)
-        
+
         pygame.display.flip()
-        
-        if ai_move_to_make:
-            pygame.time.delay(500)
+
+        if ai_move_to_make and current_state == "JOGANDO":
             state_vars['move_history_san'].append(state_vars['board'].san(ai_move_to_make))
             state_vars['board'].push(ai_move_to_make)
             ai_move_to_make = None
