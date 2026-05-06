@@ -1,6 +1,7 @@
 import pygame
 import chess
 import chess.pgn
+import chess.polyglot
 import sys
 import math
 import random
@@ -8,6 +9,7 @@ import threading
 import time
 import os
 import datetime
+import array
 
 # --- Configurações e Constantes ---
 PADDING = 70
@@ -89,6 +91,7 @@ COLOR_CAPTURE_HINT = (255, 0, 0, 150); COLOR_CHECK_HINT = (255, 0, 0, 100)
 COLOR_MENU_TEXT = (255, 255, 255); COLOR_MENU_BG = (49, 46, 43); COLOR_COORD = (200, 200, 200)
 
 PIECE_SYMBOLS = {'P':'♙','R':'♖','N':'♘','B':'♗','Q':'♕','K':'♔','p':'♟','r':'♜','n':'♞','b':'♝','q':'♛','k':'♚'}
+ANIM_DURATION = 0.15
 
 # Áreas da Tela (calculadas dinamicamente quando necessário)
 BOARD_RECT = pygame.Rect(PADDING, INFO_HEIGHT, BOARD_SIZE, BOARD_SIZE)
@@ -201,7 +204,7 @@ def _build_opening_book():
                 break
             if move not in board.legal_moves:
                 break
-            z = board.zobrist_hash()
+            z = chess.polyglot.zobrist_hash(board)
             if z not in book:
                 book[z] = []
             if move not in book[z]:
@@ -209,6 +212,64 @@ def _build_opening_book():
             board.push(move)
     return book
 _opening_book = _build_opening_book()
+
+def _pawn_structure_bonus(board, color):
+    pawns = list(board.pieces(chess.PAWN, color))
+    if not pawns:
+        return 0.0
+    score = 0.0
+    pawn_files = [chess.square_file(sq) for sq in pawns]
+    file_set = set(pawn_files)
+    enemy_pawns = list(board.pieces(chess.PAWN, not color))
+    for sq in pawns:
+        f = chess.square_file(sq)
+        r = chess.square_rank(sq)
+        # Doubled pawn penalty
+        if pawn_files.count(f) > 1:
+            score -= 0.25
+        # Isolated pawn penalty
+        adj = {f - 1, f + 1} & set(range(8))
+        if not adj & file_set:
+            score -= 0.20
+        # Passed pawn bonus (no enemy pawn on same/adjacent files ahead)
+        ranks_ahead = range(r + 1, 8) if color == chess.WHITE else range(0, r)
+        block_files = {f - 1, f, f + 1} & set(range(8))
+        if not any(
+            chess.square_file(esq) in block_files and chess.square_rank(esq) in ranks_ahead
+            for esq in enemy_pawns
+        ):
+            adv = r if color == chess.WHITE else 7 - r
+            score += 0.10 + adv * 0.05
+    return score
+
+def _king_safety_bonus(board, color):
+    king_sq = board.king(color)
+    if king_sq is None:
+        return 0.0
+    # King safety only matters when queens are present (middlegame)
+    if not board.pieces(chess.QUEEN, chess.WHITE) and not board.pieces(chess.QUEEN, chess.BLACK):
+        return 0.0
+    score = 0.0
+    kf = chess.square_file(king_sq)
+    kr = chess.square_rank(king_sq)
+    friendly_pawns = board.pieces(chess.PAWN, color)
+    enemy_pawns = board.pieces(chess.PAWN, not color)
+    shield_files = [f for f in (kf - 1, kf, kf + 1) if 0 <= f <= 7]
+    for f in shield_files:
+        r1 = kr + 1 if color == chess.WHITE else kr - 1
+        r2 = kr + 2 if color == chess.WHITE else kr - 2
+        has_r1 = 0 <= r1 <= 7 and chess.square(f, r1) in friendly_pawns
+        has_r2 = 0 <= r2 <= 7 and chess.square(f, r2) in friendly_pawns
+        if has_r1:
+            score += 0.15   # pawn immediately in front
+        elif has_r2:
+            score += 0.05   # pawn one rank further back (weaker shield)
+        # Open/semi-open file penalty near king
+        file_has_friendly = any(chess.square_file(sq) == f for sq in friendly_pawns)
+        file_has_enemy = any(chess.square_file(sq) == f for sq in enemy_pawns)
+        if not file_has_friendly:
+            score -= 0.25 if not file_has_enemy else 0.10
+    return score
 
 def evaluate_board(board):
     if board.is_checkmate(): return math.inf if board.turn == chess.BLACK else -math.inf
@@ -231,6 +292,8 @@ def evaluate_board(board):
         white_moves = board.legal_moves.count()
         board.pop()
     total_value += (white_moves - black_moves) * 0.05
+    total_value += _pawn_structure_bonus(board, chess.WHITE) - _pawn_structure_bonus(board, chess.BLACK)
+    total_value += _king_safety_bonus(board, chess.WHITE) - _king_safety_bonus(board, chess.BLACK)
     return total_value
 
 def order_moves(board, moves):
@@ -286,7 +349,7 @@ def minimax(board, depth, alpha, beta, is_maximizing_player, deadline, tt):
     if time.monotonic() >= deadline:
         raise _SearchTimeout()
     original_alpha, original_beta = alpha, beta
-    z = board.zobrist_hash()
+    z = chess.polyglot.zobrist_hash(board)
     entry = tt.get(z)
     tt_move = None
     if entry is not None:
@@ -338,7 +401,7 @@ def minimax(board, depth, alpha, beta, is_maximizing_player, deadline, tt):
     return best_val
 
 def find_best_ai_move(board, time_limit=DEFAULT_TIME_LIMIT):
-    book_moves = [m for m in _opening_book.get(board.zobrist_hash(), []) if m in board.legal_moves]
+    book_moves = [m for m in _opening_book.get(chess.polyglot.zobrist_hash(board), []) if m in board.legal_moves]
     if book_moves:
         return random.choice(book_moves)
     deadline = time.monotonic() + time_limit
@@ -351,7 +414,7 @@ def find_best_ai_move(board, time_limit=DEFAULT_TIME_LIMIT):
     for depth in range(1, 20):
         if time.monotonic() >= deadline:
             break
-        entry = _tt.get(board.zobrist_hash())
+        entry = _tt.get(chess.polyglot.zobrist_hash(board))
         tt_root_move = entry[3] if entry else None
         if tt_root_move is not None and tt_root_move in board.legal_moves:
             legal = [tt_root_move] + order_moves(board, [m for m in all_legal if m != tt_root_move])
@@ -416,8 +479,11 @@ def draw_coordinates(screen, font, perspective):
         rank_text = font.render(ranks[i], True, COLOR_COORD)
         screen.blit(rank_text, (BOARD_RECT.left - PADDING//2 - rank_text.get_width()//2, BOARD_RECT.bottom - (i+1)*SQUARE_SIZE + (SQUARE_SIZE - rank_text.get_height())//2))
         screen.blit(rank_text, (BOARD_RECT.right + 5, BOARD_RECT.bottom - (i+1)*SQUARE_SIZE + (SQUARE_SIZE - rank_text.get_height())//2))
-def draw_pieces(screen, board, font, perspective):
+def draw_pieces(screen, board, font, perspective, anim=None):
+    skip_sq = anim['to_square'] if anim else -1
     for i in range(64):
+        if i == skip_sq:
+            continue
         piece = board.piece_at(i)
         if piece:
             row, col = get_drawing_coords(i, perspective)
@@ -425,6 +491,13 @@ def draw_pieces(screen, board, font, perspective):
             text_surface = font.render(symbol, True, COLOR_PIECE_BLACK)
             text_rect = text_surface.get_rect(center=(BOARD_RECT.left + col*SQUARE_SIZE + SQUARE_SIZE//2, BOARD_RECT.top + row*SQUARE_SIZE + SQUARE_SIZE//2))
             screen.blit(text_surface, text_rect)
+    if anim:
+        t = min(1.0, (time.monotonic() - anim['start']) / anim['duration'])
+        t = t * t * (3 - 2 * t)  # smooth-step easing
+        fx, fy = anim['from_center']; tx, ty = anim['to_center']
+        cx, cy = int(fx + (tx - fx) * t), int(fy + (ty - fy) * t)
+        surf = font.render(PIECE_SYMBOLS[anim['piece'].symbol()], True, COLOR_PIECE_BLACK)
+        screen.blit(surf, surf.get_rect(center=(cx, cy)))
 def draw_visual_aids(screen, board, perspective, selected_square, possible_moves):
     if board.is_check():
         row, col = get_drawing_coords(board.king(board.turn), perspective)
@@ -579,8 +652,48 @@ def draw_action_panel(screen, font):
     pygame.draw.rect(screen, COLOR_DARK, reset_button); draw_text(screen, "Reiniciar Jogo", font, COLOR_MENU_TEXT, reset_button, "center")
     return undo_button, reset_button
 
+def _gen_sine(freq, ms, vol=0.3, decay=20.0, sample_rate=44100):
+    n = int(sample_rate * ms / 1000)
+    attack = int(sample_rate * 0.005)
+    buf = array.array('h', [0] * n)
+    for i in range(n):
+        t = i / sample_rate
+        env = math.exp(-decay * t) * min(1.0, i / max(1, attack))
+        buf[i] = int(32767 * vol * env * math.sin(2 * math.pi * freq * t))
+    return buf
+
+def _make_sounds():
+    sr = 44100
+    gap = array.array('h', [0] * int(sr * 0.055))
+    sounds = {}
+    sounds['move']     = pygame.mixer.Sound(buffer=_gen_sine(800,  50, vol=0.30, decay=28))
+    sounds['capture']  = pygame.mixer.Sound(buffer=_gen_sine(350,  80, vol=0.50, decay=18))
+    sounds['check']    = pygame.mixer.Sound(buffer=_gen_sine(1047,120, vol=0.40, decay=12))
+    sounds['game_end'] = pygame.mixer.Sound(buffer=_gen_sine(523, 130, vol=0.35, decay=10) + gap +
+                                                    _gen_sine(415, 130, vol=0.35, decay=10) + gap +
+                                                    _gen_sine(311, 220, vol=0.35, decay=7))
+    return sounds
+
+def make_anim(from_sq, to_sq, piece, perspective, flip_perspective=None):
+    fr, fc = get_drawing_coords(from_sq, perspective)
+    tr, tc = get_drawing_coords(to_sq, perspective)
+    return {
+        'piece': piece,
+        'from_center': (BOARD_RECT.left + fc*SQUARE_SIZE + SQUARE_SIZE//2, BOARD_RECT.top + fr*SQUARE_SIZE + SQUARE_SIZE//2),
+        'to_center':   (BOARD_RECT.left + tc*SQUARE_SIZE + SQUARE_SIZE//2, BOARD_RECT.top + tr*SQUARE_SIZE + SQUARE_SIZE//2),
+        'to_square': to_sq,
+        'start': time.monotonic(),
+        'duration': ANIM_DURATION,
+        'flip_perspective': flip_perspective,
+    }
+
 def main():
+    pygame.mixer.pre_init(44100, -16, 1, 512)
     pygame.init(); pygame.font.init()
+    try:
+        sounds = _make_sounds()
+    except Exception:
+        sounds = {}
     screen = pygame.display.set_mode((MENU_WIDTH, MENU_HEIGHT))
     pygame.display.set_caption("Xadrez em Python")
     _font_path = (pygame.font.match_font('dejavusans') or
@@ -608,13 +721,13 @@ def main():
         ai_thread = None
         ai_result = [None]
         _clock = state_vars.get('clock_config')
-        state_vars.update({'board':chess.Board(), 'game_state':"MENU", 'game_mode':None, 'player_color':None, 'perspective':chess.WHITE, 'selected_square':None, 'possible_moves':[], 'game_over_message':"", 'move_history_san':[], 'history_scroll_offset': 0, 'time_limit': state_vars.get('time_limit', DEFAULT_TIME_LIMIT), 'pause_page': "main", 'pending_promotion': None, 'clock_config': _clock, 'white_time': None, 'black_time': None, 'last_tick': None, 'toast_message': None, 'toast_until': 0.0, 'save_files': []})
+        state_vars.update({'board':chess.Board(), 'game_state':"MENU", 'game_mode':None, 'player_color':None, 'perspective':chess.WHITE, 'selected_square':None, 'possible_moves':[], 'game_over_message':"", 'move_history_san':[], 'history_scroll_offset': 0, 'time_limit': state_vars.get('time_limit', DEFAULT_TIME_LIMIT), 'pause_page': "main", 'pending_promotion': None, 'clock_config': _clock, 'white_time': None, 'black_time': None, 'last_tick': None, 'toast_message': None, 'toast_until': 0.0, 'save_files': [], 'anim': None})
     reset_game()
 
     def draw_game_screen():
         screen.fill(COLOR_MENU_BG); draw_board(screen); draw_coordinates(screen,font_coords,state_vars['perspective'])
         draw_visual_aids(screen,state_vars['board'],state_vars['perspective'],state_vars['selected_square'],state_vars['possible_moves'])
-        draw_pieces(screen,state_vars['board'],font_pieces,state_vars['perspective'])
+        draw_pieces(screen,state_vars['board'],font_pieces,state_vars['perspective'],state_vars.get('anim'))
         thinking = ai_thread is not None and ai_thread.is_alive()
         draw_info_panel(screen, font_ui, state_vars['board'], state_vars.get('white_time'), state_vars.get('black_time'), thinking)
         draw_history_panel(screen,font_ui,state_vars['move_history_san'],state_vars['history_scroll_offset'])
@@ -675,6 +788,7 @@ def main():
                     if is_human_turn:
                         undo_button, reset_button = draw_action_panel(screen, font_ui)
                         if undo_button.collidepoint(e.pos):
+                            state_vars['anim'] = None
                             if len(state_vars['move_history_san'])>0: state_vars['board'].pop(); state_vars['move_history_san'].pop()
                             if state_vars['game_mode']=="IA" and len(state_vars['move_history_san'])>0: state_vars['board'].pop(); state_vars['move_history_san'].pop()
                         elif reset_button.collidepoint(e.pos): reset_game(); continue
@@ -692,8 +806,14 @@ def main():
                                         state_vars['pending_promotion'] = (from_sq, sq)
                                         state_vars['game_state'] = "PROMOCAO"
                                     elif norm_m in state_vars['board'].legal_moves:
-                                        state_vars['move_history_san'].append(state_vars['board'].san(norm_m)); state_vars['board'].push(norm_m)
-                                        if state_vars['game_mode']=="PvP": state_vars['perspective']=state_vars['board'].turn
+                                        _p = state_vars['board'].piece_at(from_sq)
+                                        _cap = state_vars['board'].is_capture(norm_m)
+                                        state_vars['move_history_san'].append(state_vars['board'].san(norm_m))
+                                        state_vars['board'].push(norm_m)
+                                        _snd = 'check' if state_vars['board'].is_check() else ('capture' if _cap else 'move')
+                                        _s = sounds.get(_snd); _s and _s.play()
+                                        _new_persp = state_vars['board'].turn if state_vars['game_mode']=="PvP" else None
+                                        state_vars['anim'] = make_anim(from_sq, sq, _p, state_vars['perspective'], _new_persp)
                                     state_vars['selected_square'],state_vars['possible_moves']=None,[]
                 elif current_state == "PROMOCAO":
                     if state_vars.get('pending_promotion'):
@@ -703,8 +823,14 @@ def main():
                             if btn.collidepoint(e.pos):
                                 m = chess.Move(from_sq, to_sq, promotion=pt)
                                 if m in state_vars['board'].legal_moves:
-                                    state_vars['move_history_san'].append(state_vars['board'].san(m)); state_vars['board'].push(m)
-                                    if state_vars['game_mode']=="PvP": state_vars['perspective']=state_vars['board'].turn
+                                    _p = state_vars['board'].piece_at(from_sq)
+                                    _cap = state_vars['board'].is_capture(m)
+                                    state_vars['move_history_san'].append(state_vars['board'].san(m))
+                                    state_vars['board'].push(m)
+                                    _snd = 'check' if state_vars['board'].is_check() else ('capture' if _cap else 'move')
+                                    _s = sounds.get(_snd); _s and _s.play()
+                                    _new_persp = state_vars['board'].turn if state_vars['game_mode']=="PvP" else None
+                                    state_vars['anim'] = make_anim(from_sq, to_sq, _p, state_vars['perspective'], _new_persp)
                                 state_vars['pending_promotion'] = None
                                 state_vars['game_state'] = "JOGANDO"; state_vars['last_tick'] = None
                                 break
@@ -780,9 +906,16 @@ def main():
                     state_vars['black_time'] = max(0.0, state_vars['black_time'] - _el)
             state_vars['last_tick'] = _now
 
+        # Resolve animação concluída
+        _anim = state_vars.get('anim')
+        if _anim and time.monotonic() - _anim['start'] >= _anim['duration']:
+            if _anim.get('flip_perspective') is not None:
+                state_vars['perspective'] = _anim['flip_perspective']
+            state_vars['anim'] = None
+
         if current_state == "JOGANDO":
             is_human_turn=(state_vars['game_mode']=="PvP") or (state_vars['game_mode']=="IA" and state_vars['board'].turn==state_vars['player_color'])
-            if not is_human_turn and state_vars['game_mode']=="IA" and ai_move_to_make is None and ai_thread is None:
+            if not is_human_turn and state_vars['game_mode']=="IA" and ai_move_to_make is None and ai_thread is None and not state_vars.get('anim'):
                 board_copy = state_vars['board'].copy()
                 _tlimit = state_vars.get('time_limit', DEFAULT_TIME_LIMIT)
                 ai_result[0] = None
@@ -827,19 +960,49 @@ def main():
             pop_btn_w,pop_btn_h=200,50; pop_btn_y=(GAME_HEIGHT-pop_btn_h)//2+60
             see_board_btn=pygame.Rect((GAME_WIDTH-pop_btn_w*2-20)//2,pop_btn_y,pop_btn_w,pop_btn_h); again_popup_btn=pygame.Rect(see_board_btn.right+20,pop_btn_y,pop_btn_w,pop_btn_h)
             draw_game_over_popup(screen,font_popup,font_popup_sub,state_vars['game_over_message'],see_board_btn,again_popup_btn)
+        elif current_state == "CARREGAR":
+            screen.fill(COLOR_MENU_BG)
+            draw_text(screen,"Carregar Partida",font_popup,COLOR_MENU_TEXT,pygame.Rect(0,20,MENU_WIDTH,60),"center")
+            _saves=state_vars.get('save_files',[])
+            if not _saves:
+                draw_text(screen,"Nenhuma partida encontrada.",font_ui,COLOR_COORD,pygame.Rect(0,120,MENU_WIDTH,40),"center")
+            else:
+                _bw2,_bh2,_bx2=500,40,(MENU_WIDTH-500)//2
+                for i,fname in enumerate(_saves[:10]):
+                    _fb=pygame.Rect(_bx2,100+i*48,_bw2,_bh2)
+                    pygame.draw.rect(screen,COLOR_DARK,_fb)
+                    _label=fname.replace("partida_","").replace(".pgn","").replace("_","  ")
+                    draw_text(screen,_label,font_ui,COLOR_MENU_TEXT,_fb,"center")
+            _back2=pygame.Rect((MENU_WIDTH-200)//2,MENU_HEIGHT-60,200,40)
+            pygame.draw.rect(screen,COLOR_MENU_BG,_back2,2)
+            draw_text(screen,"Voltar",font_ui,COLOR_MENU_TEXT,_back2,"center")
+
+        if state_vars.get('toast_until',0.0) > time.monotonic():
+            _tmsg=state_vars.get('toast_message') or ''
+            _tsurf=font_ui.render(_tmsg,True,COLOR_MENU_TEXT)
+            _tw=_tsurf.get_width()+24; _tx=(screen.get_width()-_tw)//2
+            _tbg=pygame.Surface((_tw,36),pygame.SRCALPHA); _tbg.fill((20,20,20,210))
+            screen.blit(_tbg,(_tx,6)); screen.blit(_tsurf,_tsurf.get_rect(centerx=_tx+_tw//2,centery=24))
 
         pygame.display.flip()
 
-        if ai_move_to_make and current_state == "JOGANDO":
+        if ai_move_to_make and current_state == "JOGANDO" and not state_vars.get('anim'):
+            _p = state_vars['board'].piece_at(ai_move_to_make.from_square)
+            _cap = state_vars['board'].is_capture(ai_move_to_make)
             state_vars['move_history_san'].append(state_vars['board'].san(ai_move_to_make))
             state_vars['board'].push(ai_move_to_make)
+            _snd = 'check' if state_vars['board'].is_check() else ('capture' if _cap else 'move')
+            _s = sounds.get(_snd); _s and _s.play()
+            state_vars['anim'] = make_anim(ai_move_to_make.from_square, ai_move_to_make.to_square, _p, state_vars['perspective'])
             ai_move_to_make = None
             
         if current_state=="JOGANDO" and state_vars.get('white_time') is not None:
             if state_vars['white_time'] <= 0:
                 state_vars['game_state']="FIM_DE_JOGO"; state_vars['game_over_message']="Tempo esgotado!\nPretas vencem."
+                _s=sounds.get('game_end'); _s and _s.play()
             elif state_vars['black_time'] <= 0:
                 state_vars['game_state']="FIM_DE_JOGO"; state_vars['game_over_message']="Tempo esgotado!\nBrancas vencem."
+                _s=sounds.get('game_end'); _s and _s.play()
 
         if current_state=="JOGANDO" and state_vars['board'].is_game_over():
             state_vars['game_state']="FIM_DE_JOGO"; b=state_vars['board']
@@ -848,6 +1011,7 @@ def main():
             elif b.is_insufficient_material(): state_vars['game_over_message']="Empate!\n(Material Insuficiente)"
             elif b.is_seventyfive_moves(): state_vars['game_over_message']="Empate!\n(Regra dos 75 Movimentos)"
             else: state_vars['game_over_message']="Empate!\n(Repetição)"
+            _s=sounds.get('game_end'); _s and _s.play()
             
     pygame.quit()
     sys.exit()
