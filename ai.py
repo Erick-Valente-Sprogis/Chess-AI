@@ -78,7 +78,10 @@ _TT_LOWERBOUND = 1
 _TT_UPPERBOUND = 2
 _TT_MAX_SIZE   = 1_000_000
 _tt            = {}
-_NMP_REDUCTION = 2
+_NMP_REDUCTION    = 2
+_LMR_MIN_DEPTH    = 3
+_LMR_FULL_MOVES   = 4
+_ASPIRATION_DELTA = 0.5
 
 _OPENING_LINES = [
     # === 1.e4 ===
@@ -206,6 +209,19 @@ def _pawn_structure_bonus(board, color):
     return score
 
 
+def _rook_file_bonus(board, color):
+    score          = 0.0
+    friendly_pawns = board.pieces(chess.PAWN, color)
+    enemy_pawns    = board.pieces(chess.PAWN, not color)
+    for sq in board.pieces(chess.ROOK, color):
+        f            = chess.square_file(sq)
+        has_friendly = any(chess.square_file(p) == f for p in friendly_pawns)
+        has_enemy    = any(chess.square_file(p) == f for p in enemy_pawns)
+        if not has_friendly:
+            score += 0.35 if not has_enemy else 0.20
+    return score
+
+
 def _king_safety_bonus(board, color):
     king_sq = board.king(color)
     if king_sq is None:
@@ -262,6 +278,11 @@ def evaluate_board(board):
     total_value += (white_moves - black_moves) * 0.05
     total_value += _pawn_structure_bonus(board, chess.WHITE) - _pawn_structure_bonus(board, chess.BLACK)
     total_value += _king_safety_bonus(board, chess.WHITE) - _king_safety_bonus(board, chess.BLACK)
+    total_value += _rook_file_bonus(board, chess.WHITE) - _rook_file_bonus(board, chess.BLACK)
+    if len(board.pieces(chess.BISHOP, chess.WHITE)) >= 2:
+        total_value += 0.5
+    if len(board.pieces(chess.BISHOP, chess.BLACK)) >= 2:
+        total_value -= 0.5
     return total_value
 
 
@@ -363,21 +384,34 @@ def minimax(board, depth, alpha, beta, is_maximizing_player, deadline, tt, allow
         moves = order_moves(board, legal)
     best_val        = -math.inf if is_maximizing_player else math.inf
     best_move_found = None
-    if is_maximizing_player:
-        for move in moves:
-            board.push(move)
-            val = minimax(board, depth - 1, alpha, beta, False, deadline, tt)
-            board.pop()
+    for move_idx, move in enumerate(moves):
+        is_capture_move = board.is_capture(move)
+        board.push(move)
+        gives_check = board.is_check()
+        apply_lmr = (
+            depth >= _LMR_MIN_DEPTH and
+            move_idx >= _LMR_FULL_MOVES and
+            not is_capture_move and
+            not move.promotion and
+            not gives_check
+        )
+        if apply_lmr:
+            reduction = max(1, depth // 3)
+            val = minimax(board, depth - 1 - reduction, alpha, beta,
+                          not is_maximizing_player, deadline, tt)
+            if (is_maximizing_player and val > alpha) or (not is_maximizing_player and val < beta):
+                val = minimax(board, depth - 1, alpha, beta,
+                              not is_maximizing_player, deadline, tt)
+        else:
+            val = minimax(board, depth - 1, alpha, beta, not is_maximizing_player, deadline, tt)
+        board.pop()
+        if is_maximizing_player:
             if val > best_val:
                 best_val = val; best_move_found = move
             alpha = max(alpha, val)
             if beta <= alpha:
                 break
-    else:
-        for move in moves:
-            board.push(move)
-            val = minimax(board, depth - 1, alpha, beta, True, deadline, tt)
-            board.pop()
+        else:
             if val < best_val:
                 best_val = val; best_move_found = move
             beta = min(beta, val)
@@ -390,6 +424,31 @@ def minimax(board, depth, alpha, beta, is_maximizing_player, deadline, tt, allow
         )
         tt[z] = (depth, best_val, flag, best_move_found)
     return best_val
+
+
+def _root_search(board, legal, depth, alpha, beta, is_white_turn, deadline):
+    best_value = -math.inf if is_white_turn else math.inf
+    best_moves = []
+    for move in legal:
+        board.push(move)
+        try:
+            board_value = minimax(board, depth - 1, alpha, beta,
+                                  board.turn == chess.WHITE, deadline, _tt)
+        except _SearchTimeout:
+            board.pop()
+            raise
+        board.pop()
+        if is_white_turn:
+            if board_value > best_value:
+                best_value = board_value; best_moves = [move]
+            elif board_value == best_value:
+                best_moves.append(move)
+        else:
+            if board_value < best_value:
+                best_value = board_value; best_moves = [move]
+            elif board_value == best_value:
+                best_moves.append(move)
+    return best_value, best_moves
 
 
 def find_best_ai_move(board, time_limit=DEFAULT_TIME_LIMIT):
@@ -405,7 +464,8 @@ def find_best_ai_move(board, time_limit=DEFAULT_TIME_LIMIT):
     all_legal          = list(board.legal_moves)
     if not all_legal:
         return None
-    best_move = order_moves(board, all_legal)[0]
+    best_move  = order_moves(board, all_legal)[0]
+    prev_score = None
     for depth in range(1, 20):
         if time.monotonic() >= deadline:
             break
@@ -415,29 +475,17 @@ def find_best_ai_move(board, time_limit=DEFAULT_TIME_LIMIT):
             legal = [tt_root_move] + order_moves(board, [m for m in all_legal if m != tt_root_move])
         else:
             legal = order_moves(board, all_legal)
+        use_asp = prev_score is not None and math.isfinite(prev_score)
+        asp_lo  = (prev_score - _ASPIRATION_DELTA) if use_asp else -math.inf
+        asp_hi  = (prev_score + _ASPIRATION_DELTA) if use_asp else math.inf
         candidate_move = None
-        best_value     = -math.inf if is_white_turn else math.inf
-        best_moves     = []
         try:
-            for move in legal:
-                board.push(move)
-                board_value = minimax(
-                    board, depth - 1, -math.inf, math.inf,
-                    board.turn == chess.WHITE, deadline, _tt
-                )
-                board.pop()
-                if is_white_turn:
-                    if board_value > best_value:
-                        best_value = board_value; best_moves = [move]
-                    elif board_value == best_value:
-                        best_moves.append(move)
-                else:
-                    if board_value < best_value:
-                        best_value = board_value; best_moves = [move]
-                    elif board_value == best_value:
-                        best_moves.append(move)
+            best_value, best_moves = _root_search(board, legal, depth, asp_lo, asp_hi, is_white_turn, deadline)
+            if use_asp and (best_value <= asp_lo or best_value >= asp_hi):
+                best_value, best_moves = _root_search(board, legal, depth, -math.inf, math.inf, is_white_turn, deadline)
             if best_moves:
                 candidate_move = random.choice(best_moves)
+            prev_score = best_value
         except _SearchTimeout:
             while len(board.move_stack) > initial_stack_size:
                 board.pop()
