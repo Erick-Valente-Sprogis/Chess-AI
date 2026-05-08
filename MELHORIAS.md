@@ -16,12 +16,86 @@
 | ~~8~~ | ~~**README atualizado**~~ | ~~Docs: ainda descreve SEARCH_DEPTH e exige download manual da fonte~~ |
 | ~~9~~ | ~~**Avaliação de estrutura de peões**~~ | ~~IA: peões dobrados, isolados, passados~~ |
 | ~~10~~ | ~~**Segurança do rei mais detalhada**~~ | ~~IA: cobertura de peões, colunas abertas perto do rei~~ |
-| 11 | **Modo análise** | UX: navegar o histórico clicando em movimentos, tabuleiro volta a qualquer ponto |
-| 12 | **Testes automatizados** | Qualidade: testes unitários para avaliação e minimax |
+| ~~11~~ | ~~**Modo análise**~~ | ~~UX: navegar o histórico clicando em movimentos, tabuleiro volta a qualquer ponto~~ |
+| ~~12~~ | ~~**Testes automatizados**~~ | ~~Qualidade: testes unitários para avaliação e minimax~~ |
 
 ---
 
-## Sessão: 06/05/2026 → em andamento
+## Sessão: 06/05/2026
+
+**Itens concluídos:** #20 (PGN), #21 (Animação), #22 (Sons), #23 (README)
+
+---
+
+## Sessão: 07/05/2026
+
+**Itens concluídos:** #24 (Estrutura de Peões), #25 (Segurança do Rei), #26 (Modo Análise), #27 (Testes Automatizados)
+
+---
+
+## 27. Testes Automatizados
+
+**Arquivo:** `test_ai.py` (novo)
+
+**Horário:** 07/05/2026
+
+**O que foi feito:**
+Criado arquivo `test_ai.py` com 21 testes unitários usando a biblioteca padrão `unittest`. Nenhuma dependência externa necessária — apenas `chess` e `math`. O arquivo importa `main` como módulo sem chamar `main()`, permitindo testar as funções puras de IA diretamente.
+
+**Comando para executar:**
+
+```bash
+python -m unittest test_ai -v
+```
+
+**Cobertura por classe:**
+
+| Classe | Testes | O que verifica |
+| --- | --- | --- |
+| `TestEvaluateBoard` | 6 | Posição inicial ≈ 0, xeque-mate ±inf, afogamento = 0, vantagem material |
+| `TestPawnStructure` | 6 | Sem peões = 0, peões dobrados (penalidade), peão passado (bônus), isolado vs com suporte, simetria |
+| `TestKingSafety` | 3 | Sem rainha = 0, escudo de peões > rei exposto, colunas fechadas > abertas |
+| `TestMinimax` | 2 | Captura torre indefesa (profundidade 1), profundidade 0 ≈ avaliação estática |
+| `TestFindBestMove` | 4 | Captura rainha grátis, xeque-mate em 1, lance legal retornado, nenhum lance = None |
+
+**Resultado:** 21/21 OK em ~2 segundos.
+
+**Por que importa:**
+Garante que alterações futuras na função de avaliação ou no minimax não quebrem comportamentos esperados silenciosamente. Cobre os casos mais críticos: xeque-mate, afogamento, material e estrutura de peões.
+
+---
+
+## 26. Modo Análise
+
+**Arquivo:** `main.py`
+
+**Horário:** 07/05/2026
+
+**O que foi feito:**
+Implementado modo de navegação de histórico no estado REVISAO. O usuário pode agora percorrer qualquer posição da partida clicando nos movimentos do painel lateral ou usando as setas do teclado.
+
+**Componentes adicionados:**
+
+- **`_board_at(full_board, n)`** — função auxiliar que reconstrói a posição do tabuleiro após `n` meias-jogadas, replaying `full_board.move_stack[:n]` em um `chess.Board()` vazio.
+- **`analysis_index`** em `state_vars` — inteiro (0..len(history)) ou `None`. `None` = posição final sem destaque. `N` = posição após N meias-jogadas, com highlight no movimento N−1 no painel.
+- **Destaque no histórico** — `draw_history_panel` ganhou parâmetro `selected_san_index`. Quando ativo, desenha retângulo azul-escuro (`(70, 70, 120)`) sobre o movimento selecionado.
+- **`draw_game_screen` analysis-aware** — quando `analysis_index` está ativo, exibe `_board_at(board, analysis_index)` no lugar do tabuleiro real. Selecção de casas e animação são desabilitadas durante análise.
+
+**Controles em REVISAO:**
+
+| Ação | Efeito |
+| --- | --- |
+| Clique no movimento do histórico | Vai para a posição após aquele movimento |
+| ← (seta esquerda) | Recua um movimento |
+| → (seta direita) | Avança um movimento |
+| ESC | Volta à posição final (desativa destaque) |
+
+**Auto-scroll:** Ao navegar com setas, o painel de histórico rola automaticamente para manter o movimento selecionado visível (lógica de janela deslizante de 15 linhas).
+
+**Painel de ações em REVISAO:** Sobrescrito com info de navegação: posição atual `N / Total`, dica de teclas e instrução de clique.
+
+**Por que importa:**
+Antes, o estado REVISAO só mostrava a posição final da partida. Agora é possível revisar qualquer lance, acompanhar como a IA chegou a uma decisão, ou estudar erros — sem precisar exportar para um programa externo.
 
 ---
 

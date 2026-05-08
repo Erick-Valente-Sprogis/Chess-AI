@@ -540,7 +540,7 @@ def draw_info_panel(screen, font, board, white_time=None, black_time=None, ai_th
     else:
         turn_text = "IA pensando..." if ai_thinking else ("Vez das Brancas" if board.turn == chess.WHITE else "Vez das Pretas")
         draw_text(screen, turn_text, font, COLOR_MENU_TEXT, pygame.Rect(BOARD_RECT.right - 200, 0, 200, INFO_HEIGHT), "right")
-def draw_history_panel(screen, font, history_san, scroll_offset):
+def draw_history_panel(screen, font, history_san, scroll_offset, selected_san_index=None):
     pygame.draw.rect(screen, COLOR_MENU_BG, HISTORY_RECT)
     title_rect = pygame.Rect(HISTORY_RECT.left, 0, HISTORY_RECT.width, INFO_HEIGHT)
     draw_text(screen, "Histórico", font, COLOR_MENU_TEXT, title_rect, "center")
@@ -565,6 +565,10 @@ def draw_history_panel(screen, font, history_san, scroll_offset):
         num_r   = pygame.Rect(num_x,   y_offset, num_w,      line_height)
         white_r = pygame.Rect(white_x, y_offset, move_col_w, line_height)
         black_r = pygame.Rect(black_x, y_offset, move_col_w, line_height)
+        if selected_san_index == i:
+            pygame.draw.rect(screen, (70, 70, 120), white_r)
+        elif selected_san_index == i + 1 and black_move:
+            pygame.draw.rect(screen, (70, 70, 120), black_r)
         draw_text(screen, f"{move_number}.", font, COLOR_MENU_TEXT, num_r, "left")
         draw_text(screen, white_move, font, COLOR_MENU_TEXT, white_r, "left")
         draw_text(screen, black_move, font, COLOR_MENU_TEXT, black_r, "left")
@@ -687,6 +691,13 @@ def make_anim(from_sq, to_sq, piece, perspective, flip_perspective=None):
         'flip_perspective': flip_perspective,
     }
 
+def _board_at(full_board, n):
+    """Reconstruct board state after n half-moves from full_board.move_stack."""
+    b = chess.Board()
+    for m in list(full_board.move_stack)[:n]:
+        b.push(m)
+    return b
+
 def main():
     pygame.mixer.pre_init(44100, -16, 1, 512)
     pygame.init(); pygame.font.init()
@@ -721,16 +732,24 @@ def main():
         ai_thread = None
         ai_result = [None]
         _clock = state_vars.get('clock_config')
-        state_vars.update({'board':chess.Board(), 'game_state':"MENU", 'game_mode':None, 'player_color':None, 'perspective':chess.WHITE, 'selected_square':None, 'possible_moves':[], 'game_over_message':"", 'move_history_san':[], 'history_scroll_offset': 0, 'time_limit': state_vars.get('time_limit', DEFAULT_TIME_LIMIT), 'pause_page': "main", 'pending_promotion': None, 'clock_config': _clock, 'white_time': None, 'black_time': None, 'last_tick': None, 'toast_message': None, 'toast_until': 0.0, 'save_files': [], 'anim': None})
+        state_vars.update({'board':chess.Board(), 'game_state':"MENU", 'game_mode':None, 'player_color':None, 'perspective':chess.WHITE, 'selected_square':None, 'possible_moves':[], 'game_over_message':"", 'move_history_san':[], 'history_scroll_offset': 0, 'time_limit': state_vars.get('time_limit', DEFAULT_TIME_LIMIT), 'pause_page': "main", 'pending_promotion': None, 'clock_config': _clock, 'white_time': None, 'black_time': None, 'last_tick': None, 'toast_message': None, 'toast_until': 0.0, 'save_files': [], 'anim': None, 'analysis_index': None})
     reset_game()
 
     def draw_game_screen():
-        screen.fill(COLOR_MENU_BG); draw_board(screen); draw_coordinates(screen,font_coords,state_vars['perspective'])
-        draw_visual_aids(screen,state_vars['board'],state_vars['perspective'],state_vars['selected_square'],state_vars['possible_moves'])
-        draw_pieces(screen,state_vars['board'],font_pieces,state_vars['perspective'],state_vars.get('anim'))
+        screen.fill(COLOR_MENU_BG)
+        _aidx = state_vars.get('analysis_index')
+        _disp = _board_at(state_vars['board'], _aidx) if _aidx is not None else state_vars['board']
+        draw_board(screen)
+        draw_coordinates(screen, font_coords, state_vars['perspective'])
+        draw_visual_aids(screen, _disp, state_vars['perspective'],
+                         None if _aidx is not None else state_vars['selected_square'],
+                         [] if _aidx is not None else state_vars['possible_moves'])
+        draw_pieces(screen, _disp, font_pieces, state_vars['perspective'],
+                    None if _aidx is not None else state_vars.get('anim'))
         thinking = ai_thread is not None and ai_thread.is_alive()
-        draw_info_panel(screen, font_ui, state_vars['board'], state_vars.get('white_time'), state_vars.get('black_time'), thinking)
-        draw_history_panel(screen,font_ui,state_vars['move_history_san'],state_vars['history_scroll_offset'])
+        draw_info_panel(screen, font_ui, _disp, state_vars.get('white_time'), state_vars.get('black_time'), thinking)
+        _sel_san = (_aidx - 1) if _aidx is not None and _aidx > 0 else None
+        draw_history_panel(screen, font_ui, state_vars['move_history_san'], state_vars['history_scroll_offset'], _sel_san)
         return draw_action_panel(screen, font_ui)
 
     running = True
@@ -755,6 +774,23 @@ def main():
                         state_vars['game_state'] = "JOGANDO"
                     elif current_state == "CARREGAR":
                         state_vars['game_state'] = "MENU"
+                    elif current_state == "REVISAO":
+                        state_vars['analysis_index'] = None
+                if e.key in (pygame.K_LEFT, pygame.K_RIGHT) and current_state == "REVISAO":
+                    _hist_len = len(state_vars['move_history_san'])
+                    _aidx = state_vars.get('analysis_index')
+                    if _aidx is None:
+                        _aidx = _hist_len
+                    _new = max(0, _aidx - 1) if e.key == pygame.K_LEFT else min(_hist_len, _aidx + 1)
+                    state_vars['analysis_index'] = _new
+                    if _new > 0:
+                        _sel_row = (_new - 1) // 2
+                        _max_scroll = max(0, (_hist_len + 1) // 2 - 15)
+                        _cs = state_vars['history_scroll_offset']
+                        if _sel_row < _cs:
+                            state_vars['history_scroll_offset'] = max(0, _sel_row)
+                        elif _sel_row >= _cs + 15:
+                            state_vars['history_scroll_offset'] = min(_max_scroll, _sel_row - 14)
             if e.type == pygame.MOUSEWHEEL and current_state in ["JOGANDO", "REVISAO"]:
                 if HISTORY_RECT.collidepoint(pygame.mouse.get_pos()):
                     state_vars['history_scroll_offset'] -= e.y
@@ -841,7 +877,26 @@ def main():
                     elif again_popup_btn.collidepoint(e.pos): reset_game()
                 elif current_state == "REVISAO":
                     btn_w,btn_h=400,40; _below=GAME_HEIGHT-BOARD_RECT.bottom; again_review_btn=pygame.Rect((BOARD_RECT.width-btn_w)//2+BOARD_RECT.left,BOARD_RECT.bottom+(_below-btn_h)//2,btn_w,btn_h)
-                    if again_review_btn.collidepoint(e.pos): reset_game()
+                    if again_review_btn.collidepoint(e.pos):
+                        reset_game()
+                    elif HISTORY_RECT.collidepoint(e.pos):
+                        _hist = state_vars['move_history_san']
+                        _num_w = 38; _col_w = (HISTORY_RECT.width - _num_w - 20) // 2
+                        _wx = HISTORY_RECT.left + 5 + _num_w + 5
+                        _bx = _wx + _col_w + 5
+                        _ry = e.pos[1] - (INFO_HEIGHT + 32)
+                        if _ry >= 0:
+                            _row = _ry // 28 + state_vars['history_scroll_offset']
+                            _san_i = _row * 2 + (1 if e.pos[0] >= _bx else 0)
+                            if _san_i < len(_hist):
+                                state_vars['analysis_index'] = _san_i + 1
+                                _sel_row = _san_i // 2
+                                _max_scroll = max(0, (len(_hist) + 1) // 2 - 15)
+                                _cs = state_vars['history_scroll_offset']
+                                if _sel_row < _cs:
+                                    state_vars['history_scroll_offset'] = max(0, _sel_row)
+                                elif _sel_row >= _cs + 15:
+                                    state_vars['history_scroll_offset'] = min(_max_scroll, _sel_row - 14)
                 elif current_state == "CARREGAR":
                     saves=state_vars.get('save_files',[])
                     _bw2,_bh2,_bx2=500,40,(MENU_WIDTH-500)//2
@@ -952,6 +1007,12 @@ def main():
             if current_state == "REVISAO":
                 btn_w,btn_h=400,40; _below=GAME_HEIGHT-BOARD_RECT.bottom; again_review_btn=pygame.Rect((BOARD_RECT.width-btn_w)//2+BOARD_RECT.left,BOARD_RECT.bottom+(_below-btn_h)//2,btn_w,btn_h)
                 pygame.draw.rect(screen, COLOR_DARK, again_review_btn); draw_text(screen, "Ir para o Menu", font_ui, COLOR_MENU_TEXT, again_review_btn, "center")
+                _aidx_r = state_vars.get('analysis_index'); _hlen = len(state_vars['move_history_san'])
+                _pos_n = _aidx_r if _aidx_r is not None else _hlen
+                pygame.draw.rect(screen, COLOR_MENU_BG, ACTION_PANEL_RECT)
+                draw_text(screen, f"Posição  {_pos_n} / {_hlen}", font_ui, COLOR_COORD, pygame.Rect(ACTION_PANEL_RECT.x, ACTION_PANEL_RECT.y + 12, ACTION_PANEL_RECT.width, 28), "center")
+                draw_text(screen, "← →  navegar   |   ESC: final", font_ui, COLOR_COORD, pygame.Rect(ACTION_PANEL_RECT.x, ACTION_PANEL_RECT.y + 50, ACTION_PANEL_RECT.width, 28), "center")
+                draw_text(screen, "Clique no histórico para ir ao movimento", font_ui, COLOR_COORD, pygame.Rect(ACTION_PANEL_RECT.x, ACTION_PANEL_RECT.y + 88, ACTION_PANEL_RECT.width, 28), "center")
         elif current_state == "PAUSE":
             draw_game_screen()
             draw_pause_menu(screen, font_popup, font_ui, state_vars.get('pause_page', 'main'), state_vars.get('time_limit', DEFAULT_TIME_LIMIT))
