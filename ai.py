@@ -84,6 +84,7 @@ _LMR_FULL_MOVES   = 4
 _ASPIRATION_DELTA = 0.5
 _killers          = {}   # {depth: [move1, move2]}
 _history          = {}   # {(from_sq, to_sq): score}
+_FUTILITY_MARGIN  = 1.0  # ~1 peão; poda quiet moves em depth==1 quando eval+margin <= alpha
 
 _OPENING_LINES = [
     # === 1.e4 ===
@@ -288,6 +289,28 @@ def evaluate_board(board):
     return total_value
 
 
+def _see(board, move):
+    """
+    Static Exchange Evaluation simplificado.
+    Retorna o ganho material líquido esperado para a captura.
+    - victim >= attacker  → positivo (troca ganhante/igual), sem checar defesa
+    - victim <  attacker  → positivo se não defendido, negativo se defendido
+    """
+    to_sq    = move.to_square
+    victim   = board.piece_at(to_sq)
+    attacker = board.piece_at(move.from_square)
+    if victim is None or attacker is None:
+        return 0
+    v_val = piece_values[victim.piece_type]
+    a_val = piece_values[attacker.piece_type]
+    if v_val >= a_val:
+        return v_val - a_val  # ganhante ou igual independente de defesa
+    defenders = board.attackers(not attacker.color, to_sq)
+    if not defenders:
+        return v_val  # não defendida: seguro tomar com peça cara
+    return v_val - a_val  # defendida e victim < attacker: troca perdedora
+
+
 def _update_quiet_move_stats(move, depth):
     key = (move.from_square, move.to_square)
     _history[key] = _history.get(key, 0) + depth * depth
@@ -301,11 +324,9 @@ def _update_quiet_move_stats(move, depth):
 def order_moves(board, moves, depth=None):
     def score(move):
         if board.is_capture(move):
-            victim   = board.piece_at(move.to_square)
-            attacker = board.piece_at(move.from_square)
-            if victim and attacker:
-                return 10000 + piece_values[victim.piece_type] * 10 - piece_values[attacker.piece_type]
-            return 10000
+            see = _see(board, move)
+            # Capturas ganhantes/iguais no topo; perdedoras abaixo dos quiet moves
+            return (10000 + see) if see >= 0 else see
         if move.promotion:
             return 9000 + piece_values[move.promotion] * 10
         if depth is not None:
@@ -398,12 +419,27 @@ def minimax(board, depth, alpha, beta, is_maximizing_player, deadline, tt, allow
         moves = [tt_move] + order_moves(board, [m for m in legal if m != tt_move], depth=depth)
     else:
         moves = order_moves(board, legal, depth=depth)
+    futility_eval = (
+        evaluate_board(board)
+        if depth == 1 and not board.is_check()
+        else None
+    )
     best_val        = -math.inf if is_maximizing_player else math.inf
     best_move_found = None
     for move_idx, move in enumerate(moves):
         is_capture_move = board.is_capture(move)
         board.push(move)
         gives_check = board.is_check()
+        if (futility_eval is not None
+                and not is_capture_move
+                and not move.promotion
+                and not gives_check):
+            if is_maximizing_player and futility_eval + _FUTILITY_MARGIN <= alpha:
+                board.pop()
+                continue
+            if not is_maximizing_player and futility_eval - _FUTILITY_MARGIN >= beta:
+                board.pop()
+                continue
         apply_lmr = (
             depth >= _LMR_MIN_DEPTH and
             move_idx >= _LMR_FULL_MOVES and
