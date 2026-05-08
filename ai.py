@@ -82,6 +82,8 @@ _NMP_REDUCTION    = 2
 _LMR_MIN_DEPTH    = 3
 _LMR_FULL_MOVES   = 4
 _ASPIRATION_DELTA = 0.5
+_killers          = {}   # {depth: [move1, move2]}
+_history          = {}   # {(from_sq, to_sq): score}
 
 _OPENING_LINES = [
     # === 1.e4 ===
@@ -286,17 +288,31 @@ def evaluate_board(board):
     return total_value
 
 
-def order_moves(board, moves):
+def _update_quiet_move_stats(move, depth):
+    key = (move.from_square, move.to_square)
+    _history[key] = _history.get(key, 0) + depth * depth
+    k = _killers.setdefault(depth, [])
+    if move not in k:
+        k.insert(0, move)
+        if len(k) > 2:
+            k.pop()
+
+
+def order_moves(board, moves, depth=None):
     def score(move):
-        s = 0
         if board.is_capture(move):
             victim   = board.piece_at(move.to_square)
             attacker = board.piece_at(move.from_square)
             if victim and attacker:
-                s += piece_values[victim.piece_type] * 10 - piece_values[attacker.piece_type]
+                return 10000 + piece_values[victim.piece_type] * 10 - piece_values[attacker.piece_type]
+            return 10000
         if move.promotion:
-            s += piece_values[move.promotion] * 10
-        return s
+            return 9000 + piece_values[move.promotion] * 10
+        if depth is not None:
+            killers = _killers.get(depth, [])
+            if move in killers:
+                return 8001 - killers.index(move)
+        return _history.get((move.from_square, move.to_square), 0)
     return sorted(moves, key=score, reverse=True)
 
 
@@ -379,9 +395,9 @@ def minimax(board, depth, alpha, beta, is_maximizing_player, deadline, tt, allow
                 return alpha
     legal = list(board.legal_moves)
     if tt_move is not None and tt_move in board.legal_moves:
-        moves = [tt_move] + order_moves(board, [m for m in legal if m != tt_move])
+        moves = [tt_move] + order_moves(board, [m for m in legal if m != tt_move], depth=depth)
     else:
-        moves = order_moves(board, legal)
+        moves = order_moves(board, legal, depth=depth)
     best_val        = -math.inf if is_maximizing_player else math.inf
     best_move_found = None
     for move_idx, move in enumerate(moves):
@@ -408,15 +424,19 @@ def minimax(board, depth, alpha, beta, is_maximizing_player, deadline, tt, allow
         if is_maximizing_player:
             if val > best_val:
                 best_val = val; best_move_found = move
-            alpha = max(alpha, val)
-            if beta <= alpha:
+            if val >= beta:
+                if not is_capture_move and not move.promotion and not gives_check:
+                    _update_quiet_move_stats(move, depth)
                 break
+            alpha = max(alpha, val)
         else:
             if val < best_val:
                 best_val = val; best_move_found = move
-            beta = min(beta, val)
-            if beta <= alpha:
+            if val <= alpha:
+                if not is_capture_move and not move.promotion and not gives_check:
+                    _update_quiet_move_stats(move, depth)
                 break
+            beta = min(beta, val)
     if len(tt) < _TT_MAX_SIZE:
         flag = (
             _TT_EXACT if original_alpha < best_val < original_beta
@@ -458,6 +478,8 @@ def find_best_ai_move(board, time_limit=DEFAULT_TIME_LIMIT):
     ]
     if book_moves:
         return random.choice(book_moves)
+    _killers.clear()
+    _history.clear()
     deadline           = time.monotonic() + time_limit
     is_white_turn      = board.turn == chess.WHITE
     initial_stack_size = len(board.move_stack)
