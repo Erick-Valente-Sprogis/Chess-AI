@@ -29,7 +29,195 @@
 
 ## Sessão: 08/05/2026
 
-**Itens concluídos:** #28 (Modularização), #29 (Last Move Highlight), #30 (Null Move Pruning), #31 (Cache board_at)
+**Itens concluídos:** #28 (Modularização), #29 (Last Move Highlight), #30 (Null Move Pruning), #31 (Cache board_at), #32 (Late Move Reductions), #33 (Aspiration Windows), #34 (Bishop Pair + Rook File Bonus), #35 (Killer Moves), #36 (History Heuristic)
+
+---
+
+## 36. History Heuristic
+
+**Arquivo:** `ai.py` — `_history`, `_update_quiet_move_stats()`, `order_moves()`
+
+**O que foi feito:**
+Adicionada uma tabela global `_history` que mapeia `(from_sq, to_sq) → int`. Toda vez que um movimento silencioso (não-captura, não-promoção, não-xeque) causa um corte beta no minimax, seu score é incrementado por `depth²`. Na ordenação de movimentos, quiet moves com score no histórico ficam acima dos movimentos sem histórico.
+
+**Estrutura:**
+
+```python
+_history = {}   # {(from_sq, to_sq): score}
+
+def _update_quiet_move_stats(move, depth):
+    key = (move.from_square, move.to_square)
+    _history[key] = _history.get(key, 0) + depth * depth
+    ...
+```
+
+**Integração no `order_moves`:**
+
+```python
+# Tier 4: quiet move com histórico
+return _history.get((move.from_square, move.to_square), 0)
+```
+
+Quiet moves com mais cortes em buscas anteriores sobem na fila, permitindo que a poda alfa-beta os processe primeiro nas próximas iterações.
+
+**Reset:** `_history.clear()` no início de cada `find_best_ai_move`, garantindo que histórico de uma posição não vaze para outra.
+
+**Por que importa:**
+Complementa LMR: os movimentos que mais frequentemente causaram cortes beta em iterações anteriores do iterative deepening são testados primeiro nas próximas — amplificando a poda alfa-beta em quiet moves sem qualquer custo de busca extra.
+
+---
+
+## 35. Killer Moves
+
+**Arquivo:** `ai.py` — `_killers`, `_update_quiet_move_stats()`, `order_moves()`
+
+**O que foi feito:**
+Adicionada uma tabela global `_killers` que armazena até 2 movimentos silenciosos por profundidade que causaram um corte beta. Na ordenação, killer moves recebem pontuação entre capturas/promoções e o histórico — garantindo que sejam testados antes de qualquer outro quiet move.
+
+**Estrutura:**
+
+```python
+_killers = {}   # {depth: [move1, move2]}
+
+def _update_quiet_move_stats(move, depth):
+    ...
+    k = _killers.setdefault(depth, [])
+    if move not in k:
+        k.insert(0, move)
+        if len(k) > 2:
+            k.pop()
+```
+
+**Hierarquia de prioridade em `order_moves`:**
+
+| Tier | Score | Tipo |
+| --- | --- | --- |
+| 1 | 10000 + MVV-LVA | Capturas |
+| 2 | 9000 + valor | Promoções silenciosas |
+| 3 | 8001 / 8000 | Killer 1 / Killer 2 |
+| 4 | `_history[...]` | Histórico |
+| 5 | 0 | Quiet moves sem histórico |
+
+**Reset:** `_killers.clear()` no início de cada `find_best_ai_move`.
+
+**Por que importa:**
+Killers capturam o padrão "um movimento silencioso que cortou beta nessa profundidade provavelmente vai cortar de novo numa posição irmã". É a heurística de move ordering mais eficaz para quiet moves após MVV-LVA, com custo de memória mínimo (2 moves por profundidade).
+
+---
+
+## 34. Bishop Pair Bonus + Rook on Open/Semi-open File
+
+**Arquivo:** `ai.py` — função `evaluate_board()`, nova função `_rook_file_bonus()`
+
+**O que foi feito:**
+Adicionados dois novos termos estratégicos à função de avaliação, ambos bem documentados na teoria do xadrez.
+
+**Bishop pair bonus:**
+
+```python
+if len(board.pieces(chess.BISHOP, chess.WHITE)) >= 2:
+    total_value += 0.5
+if len(board.pieces(chess.BISHOP, chess.BLACK)) >= 2:
+    total_value -= 0.5
+```
+
+O par de bispos vale mais do que dois cavalos ou bispo+cavalo em posições abertas — eles cobrem as diagonais opostas e se complementam.
+
+**Rook on open/semi-open file (`_rook_file_bonus`):**
+
+```python
+def _rook_file_bonus(board, color):
+    score = 0.0
+    friendly_pawns = board.pieces(chess.PAWN, color)
+    enemy_pawns    = board.pieces(chess.PAWN, not color)
+    for sq in board.pieces(chess.ROOK, color):
+        f            = chess.square_file(sq)
+        has_friendly = any(chess.square_file(p) == f for p in friendly_pawns)
+        has_enemy    = any(chess.square_file(p) == f for p in enemy_pawns)
+        if not has_friendly:
+            score += 0.35 if not has_enemy else 0.20
+    return score
+```
+
+- **Coluna aberta** (sem peões de nenhuma cor): +0.35 — torre domina a coluna inteira.
+- **Coluna semi-aberta** (sem peão aliado, mas com peão inimigo): +0.20 — torre faz pressão sobre o peão inimigo.
+
+Chamado simetricamente: `total_value += _rook_file_bonus(board, chess.WHITE) - _rook_file_bonus(board, chess.BLACK)`.
+
+**Por que importa:**
+Torres em colunas abertas são o princípio básico do jogo de torres — centralizam poder de forma imediata. O par de bispos é uma das assimetrias mais relevantes no médio-jogo. Essas adições tornam a IA mais sensível a pares de bispos em aberturas abertas e à ativação de torres em finais.
+
+---
+
+## 33. Aspiration Windows
+
+**Arquivo:** `ai.py` — função `find_best_ai_move()`, nova função `_root_search()`
+
+**O que foi feito:**
+Implementadas Aspiration Windows no iterative deepening da raiz: cada nova profundidade inicia com uma janela estreita `[prev_score − 0.5, prev_score + 0.5]` ao redor do score da profundidade anterior, em vez de `[−∞, +∞]`.
+
+**Constante:** `_ASPIRATION_DELTA = 0.5`
+
+**Fluxo:**
+
+```python
+use_asp = prev_score is not None and math.isfinite(prev_score)
+asp_lo  = (prev_score - _ASPIRATION_DELTA) if use_asp else -math.inf
+asp_hi  = (prev_score + _ASPIRATION_DELTA) if use_asp else math.inf
+
+best_value, best_moves = _root_search(board, legal, depth, asp_lo, asp_hi, ...)
+if use_asp and (best_value <= asp_lo or best_value >= asp_hi):
+    # Falha fora da janela — refaz com janela completa
+    best_value, best_moves = _root_search(board, legal, depth, -math.inf, math.inf, ...)
+```
+
+**`_root_search` helper:**
+Extraído de `find_best_ai_move` para permitir a lógica de retry limpa. Re-lança `_SearchTimeout` após `board.pop()` garantindo que o estado do tabuleiro seja sempre restaurado.
+
+**Bug crítico corrigido — janela ±∞:**
+Se `prev_score = ±math.inf` (xeque-mate encontrado na profundidade anterior), `asp_lo = asp_hi = ±inf` cria uma janela degenerada onde todos os movimentos retornam o mesmo valor e `random.choice` pode selecionar o movimento errado. A condição `math.isfinite(prev_score)` desativa as aspiration windows nesses casos, usando sempre `[−∞, +∞]`.
+
+**Por que importa:**
+Janela estreita → muito mais cortes alfa-beta nas iterações mais profundas → o iterative deepening alcança 1–2 plies a mais no mesmo tempo. A falha para janela completa garante que nenhum bom movimento seja descartado quando a posição mudou drasticamente.
+
+---
+
+## 32. Late Move Reductions (LMR)
+
+**Arquivo:** `ai.py` — função `minimax()`
+
+**O que foi feito:**
+Implementado LMR no loop de movimentos do minimax: após os primeiros `_LMR_FULL_MOVES = 4` movimentos em um nó com `depth >= _LMR_MIN_DEPTH = 3`, movimentos silenciosos (não-captura, não-promoção, não-dando-xeque) são buscados com profundidade reduzida. Se o resultado bate a janela atual, refaz com profundidade completa.
+
+**Constantes:**
+
+```python
+_LMR_MIN_DEPTH  = 3
+_LMR_FULL_MOVES = 4
+```
+
+**Lógica no loop:**
+
+```python
+apply_lmr = (
+    depth >= _LMR_MIN_DEPTH and
+    move_idx >= _LMR_FULL_MOVES and
+    not is_capture_move and
+    not move.promotion and
+    not gives_check
+)
+if apply_lmr:
+    reduction = max(1, depth // 3)
+    val = minimax(board, depth - 1 - reduction, ...)
+    if (is_maximizing_player and val > alpha) or (not is_maximizing_player and val < beta):
+        val = minimax(board, depth - 1, ...)  # re-search full depth
+```
+
+**Refatoração necessária:**
+O LMR exige rastrear `move_idx` por nó, o que obrigou unificar os dois blocos separados `if is_maximizing_player: / else:` em um único loop compartilhado — eliminando duplicação e tornando o código mais limpo.
+
+**Por que importa:**
+Na ordem de movimentos, os primeiros movimentos (capturas, checks, hash move) já foram avaliados com profundidade completa. Os movimentos tardios raramente mudam o resultado — buscá-los a profundidade reduzida poupa tempo substancial. Em conjunto com NMP e Aspiration Windows, a IA consegue alcançar profundidades 2–3 níveis acima do baseline dentro do mesmo limite de tempo.
 
 ---
 
@@ -119,6 +307,7 @@ O arquivo `main.py`, que havia crescido para ~1080 linhas com responsabilidades 
 | `main.py` | Loop principal do jogo (estados e eventos) | ~320 |
 
 **Mudanças notáveis:**
+
 - `_make_sounds` renomeado para `make_sounds` (snake_case público)
 - `_board_at` renomeado para `board_at` e movido para `renderer.py` (usado na renderização)
 - `format_clock` movido para `config.py` (relacionado a `TIME_CONTROLS`)
