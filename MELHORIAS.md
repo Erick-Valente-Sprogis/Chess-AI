@@ -29,7 +29,78 @@
 
 ## Sessão: 08/05/2026
 
-**Itens concluídos:** #28 (Modularização), #29 (Last Move Highlight), #30 (Null Move Pruning), #31 (Cache board_at), #32 (Late Move Reductions), #33 (Aspiration Windows), #34 (Bishop Pair + Rook File Bonus), #35 (Killer Moves), #36 (History Heuristic)
+**Itens concluídos:** #28 (Modularização), #29 (Last Move Highlight), #30 (Null Move Pruning), #31 (Cache board_at), #32 (Late Move Reductions), #33 (Aspiration Windows), #34 (Bishop Pair + Rook File Bonus), #35 (Killer Moves), #36 (History Heuristic), #37 (Futility Pruning), #38 (SEE)
+
+---
+
+## 38. SEE — Static Exchange Evaluation
+
+**Arquivo:** `ai.py` — nova função `_see()`, `order_moves()`
+
+**O que foi feito:**
+Substituído o critério MVV-LVA (Most Valuable Victim – Least Valuable Attacker) por SEE na ordenação de capturas. MVV-LVA ordenava por `vítima × 10 - atacante`, o que colocava QxP(defendido) no mesmo tier de QxP(livre). SEE distingue os dois casos.
+
+**Lógica de `_see(board, move)`:**
+
+```python
+if v_val >= a_val:
+    return v_val - a_val   # ganhante/igual: bom independente de defesa
+defenders = board.attackers(not attacker.color, to_sq)
+if not defenders:
+    return v_val           # peça cara toma peça barata não-defendida: seguro
+return v_val - a_val       # peça cara toma peça barata defendida: troca perdedora
+```
+
+**Hierarquia resultante em `order_moves`:**
+
+| Tier | Score | Tipo |
+| --- | --- | --- |
+| 1 | 10000 + SEE score | Capturas ganhantes/iguais |
+| 2 | 9000+ | Promoções silenciosas |
+| 3 | 8001/8000 | Killer moves |
+| 4 | history score | History heuristic |
+| 5 | 0 | Quiet moves sem histórico |
+| 6 | SEE score (negativo) | **Capturas perdedoras** |
+
+O impacto crítico: capturas perdedoras (ex: QxP defendido por peão) descem do topo da fila para **abaixo de todos os quiet moves**. Isso permite que a poda alfa-beta corte muito mais ramos antes de explorar essas trocas ruins.
+
+**Por que importa:**
+MVV-LVA colocava capturas perdedoras no início da busca — desperdiçando profundidade em nós que geralmente não mudam a avaliação positivamente. Com SEE, a IA explora primeiro as capturas que realmente importam (atacar peças penduradas, tomar peça maior com menor) e adia as perdedoras, aumentando a profundidade efetiva de busca.
+
+---
+
+## 37. Futility Pruning
+
+**Arquivo:** `ai.py` — função `minimax()`
+
+**O que foi feito:**
+Adicionada poda de futilidade em nós com `depth == 1` (um ply acima das folhas): antes de cada chamada recursiva, quiet moves (não-captura, não-promoção, não-xeque) são podados se a avaliação estática da posição atual mais uma margem não consegue superar alpha.
+
+**Constante:** `_FUTILITY_MARGIN = 1.0` (~1 peão)
+
+**Lógica no loop:**
+
+```python
+futility_eval = (
+    evaluate_board(board)
+    if depth == 1 and not board.is_check()
+    else None
+)
+# ...
+if (futility_eval is not None
+        and not is_capture_move
+        and not move.promotion
+        and not gives_check):
+    if is_maximizing_player and futility_eval + _FUTILITY_MARGIN <= alpha:
+        board.pop(); continue
+    if not is_maximizing_player and futility_eval - _FUTILITY_MARGIN >= beta:
+        board.pop(); continue
+```
+
+`evaluate_board` é computado uma única vez por nó (antes do loop), somente quando `depth == 1` e o rei não está em xeque — o que amortiza o custo. Movimentos táticos (capturas, promoções, lances que dão xeque) **nunca** são podados.
+
+**Por que importa:**
+Em nós a 1 ply das folhas, a maioria dos movimentos silenciosos não muda a avaliação o suficiente para virar o resultado. Podar esses movimentos antecipadamente reduz o fator de ramificação efetivo nas camadas mais profundas, permitindo que o iterative deepening alcance 1 ply a mais no mesmo orçamento de tempo.
 
 ---
 
