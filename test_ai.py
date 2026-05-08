@@ -8,7 +8,7 @@ import unittest
 import chess
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import main as ai  # módulo inteiro; main() NÃO é chamada
+import ai  # módulo de IA; main() NÃO é chamada
 
 
 # ---------------------------------------------------------------------------

@@ -27,6 +27,111 @@
 
 ---
 
+## Sessão: 08/05/2026
+
+**Itens concluídos:** #28 (Modularização), #29 (Last Move Highlight), #30 (Null Move Pruning), #31 (Cache board_at)
+
+---
+
+## 31. Cache de board_at no Modo Análise
+
+**Arquivo:** `main.py` — função `draw_game_screen()`
+
+**O que foi feito:**
+`board_at(full_board, n)` replayava todos os `n` lances a partir do zero toda vez que era chamada. Como `draw_game_screen()` é chamada a cada frame (~60x/s), uma partida de 80 lances gerava 80 pushes por frame — O(n) por frame ou O(n × fps) por segundo.
+
+Adicionada uma entrada `'analysis_board_cache'` em `state_vars` que armazena `(index, board_reconstruído)`. O recálculo só ocorre quando `analysis_index` muda:
+
+```python
+if _aidx is not None:
+    _cache = state_vars.get('analysis_board_cache')
+    if _cache is None or _cache[0] != _aidx:
+        _cache = (_aidx, board_at(state_vars['board'], _aidx))
+        state_vars['analysis_board_cache'] = _cache
+    _disp = _cache[1]
+```
+
+O cache é invalidado automaticamente ao chamar `reset_game()` (que zera `analysis_board_cache`).
+
+**Por que importa:**
+No modo análise, o tabuleiro exibido é constante entre navegações. O custo de reconstrução passava de O(n×fps) para O(1) por frame, com recálculo pontual (O(n)) só ao navegar — comportamento essencialmente imperceptível.
+
+---
+
+## 30. Null Move Pruning
+
+**Arquivo:** `ai.py` — função `minimax()`
+
+**O que foi feito:**
+Adicionada poda por null move no início de `minimax`, antes de gerar os lances legais. A ideia: se mesmo "passando a vez" (sem jogar nada) a posição já é boa demais para o adversário cortar a janela beta/alpha, o nó pode ser podado completamente.
+
+**Parâmetros:**
+
+- `_NMP_REDUCTION = 2` — profundidade reduzida na busca do null move
+- `allow_null=True` — evita null moves consecutivos (chamada recursiva usa `allow_null=False`)
+
+**Condições de segurança:**
+
+- `depth >= _NMP_REDUCTION + 1` (profundidade mínima 3)
+- `not board.is_check()` — null move é ilegal em xeque
+- Lado tem peças além de peões/rei — evita falsos positivos em finais de zugzwang
+
+**Por que importa:**
+Null Move Pruning é a poda mais eficaz após alpha-beta. Em posições com forte vantagem posicional, poda ramos inteiros sem explorá-los, permitindo ao iterative deepening alcançar 1–2 plies a mais no mesmo tempo de cálculo.
+
+---
+
+## 29. Highlight do Último Lance
+
+**Arquivos:** `config.py`, `renderer.py`, `main.py`
+
+**O que foi feito:**
+Adicionado overlay dourado semi-transparente nas casas de origem e destino do último lance jogado, estilo chess.com.
+
+- **`config.py`**: nova constante `COLOR_LAST_MOVE = (205, 170, 0, 100)` — dourado com 100/255 de alfa
+- **`renderer.py`**: `draw_visual_aids` ganhou parâmetro `last_move=None`; quando presente, desenha o overlay nas duas casas antes dos demais highlights (check, seleção, hints ficam por cima)
+- **`main.py`**: `draw_game_screen` computa `_last_move = _disp.peek() if _disp.move_stack else None` e passa para `draw_visual_aids`; funciona tanto no jogo ao vivo quanto no modo análise (onde `_disp` é o board reconstruído)
+
+**Por que importa:**
+Sem highlight, é difícil identificar rapidamente qual peça a IA moveu — especialmente em movimentos silenciosos (sem captura ou xeque). O destaque dourado orienta o olhar imediatamente para o lance relevante.
+
+---
+
+## 28. Modularização — Divisão do main.py em módulos
+
+**Arquivos criados:** `config.py`, `ai.py`, `renderer.py`, `sounds.py`, `pgn_utils.py`
+**Arquivos modificados:** `main.py`, `test_ai.py`
+
+**Horário:** 08/05/2026
+
+**O que foi feito:**
+O arquivo `main.py`, que havia crescido para ~1080 linhas com responsabilidades misturadas, foi dividido em 6 módulos com responsabilidades únicas. O `main.py` agora contém apenas o loop principal do jogo (~320 linhas).
+
+**Estrutura resultante:**
+
+| Arquivo | Responsabilidade | Linhas aprox. |
+| --- | --- | --- |
+| `config.py` | Constantes de layout, cores, símbolos, `format_clock` | ~65 |
+| `ai.py` | Motor de IA: avaliação, minimax, quiescence, livro de aberturas | ~290 |
+| `renderer.py` | Todas as funções `draw_*`, `make_anim`, `board_at` | ~250 |
+| `sounds.py` | Geração de sons por síntese de onda senoidal | ~30 |
+| `pgn_utils.py` | Export/import PGN, listagem de saves | ~55 |
+| `main.py` | Loop principal do jogo (estados e eventos) | ~320 |
+
+**Mudanças notáveis:**
+- `_make_sounds` renomeado para `make_sounds` (snake_case público)
+- `_board_at` renomeado para `board_at` e movido para `renderer.py` (usado na renderização)
+- `format_clock` movido para `config.py` (relacionado a `TIME_CONTROLS`)
+- `test_ai.py` atualizado: `import main as ai` → `import ai`
+- Cadeia de imports sem ciclos: `config ← ai`, `config ← renderer`, `config ← pgn_utils`
+
+**Resultado:** 21/21 testes passando sem alteração de comportamento.
+
+**Por que importa:**
+Facilita manutenção futura: adicionar uma função de IA → edita só `ai.py`; ajustar cores ou layout → edita só `config.py`; nunca mais precisar navegar 1080 linhas para encontrar uma função de desenho.
+
+---
+
 ## Sessão: 07/05/2026
 
 **Itens concluídos:** #24 (Estrutura de Peões), #25 (Segurança do Rei), #26 (Modo Análise), #27 (Testes Automatizados)
